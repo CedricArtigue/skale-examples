@@ -18,7 +18,41 @@ DataFrame.prototype.show = thenify(function(n, done) {
 	});
 });
 
-DataFrame.prototype.extractSchema = thenify(function(done) {
+DataFrame.prototype.select = function(fields) {
+	if (!Array.isArray(fields)) throw new Error('DataFrame.select(): fields argument must be an instance of Array.');
+	var fields_idx = [];
+	for (var i in fields) {
+		var idx = this.fields.indexOf(fields[i]);
+		if (idx == -1) throw new Error('DataFrame.select(): field ' + fields[i] + ' does not exist.');
+		fields_idx.push(idx);
+	}
+
+	function mapper(data, fields_idx) {
+		var tmp = [];
+		for (var i in fields_idx) tmp.push(data[fields_idx[i]]);
+		return tmp;
+	}
+
+	return new DataFrame(this.dataset.map(mapper, fields_idx), fields);
+}
+
+DataFrame.prototype.where = function(expr) {
+	// expr = {field: {$eq: value}}
+	var fieldIdx = {};
+	this.fields.map((f, i) => fieldIdx[f] = i);
+
+	function filter(data, args) {
+		var expr = args.expr, fieldIdx = args.fieldIdx;
+		for (var field in expr) {
+			if ((expr[field].$eq != undefined) && (data[args.fieldIdx[field]] != expr[field].$eq)) return false;
+			if ((expr[field].$neq != undefined) && (data[args.fieldIdx[field]] == expr[field].$neq)) return false;
+		}
+		return true;
+	}
+	return new DataFrame(this.dataset.filter(filter, {fieldIdx: fieldIdx, expr: expr}), this.fields)
+}
+
+DataFrame.prototype.showSchema = thenify(function(done) {
 	var self = this, schema = {};
 	this.fields.map((f, i) => schema[f] = {idx: i, isReal: true, categories: []});
 
@@ -27,8 +61,8 @@ DataFrame.prototype.extractSchema = thenify(function(done) {
 			var idx = schema[field].idx, value = data[idx];
 			if (isNaN(Number(value))) {
 				schema[field].isReal = false;
-				if (schema[field].categories.indexOf(value) == -1)
-					schema[field].categories.push(value);
+				// if (schema[field].categories.indexOf(value) == -1)
+				// 	schema[field].categories.push(value);
 			}
 		}
 		return schema;
@@ -38,17 +72,18 @@ DataFrame.prototype.extractSchema = thenify(function(done) {
 		for (var field in schema1) {
 			if (schema1[field].isReal == undefined) schema1[field].isReal = schema2[field].isReal
 			else schema1[field].isReal = schema1[field].isReal && schema2[field].isReal;
-			for (var i in schema2[field].categories)
-				if (schema1[field].categories.indexOf(schema2[field].categories[i]) == -1)
-					schema1[field].categories.push(schema2[field].categories[i])
+			// for (var i in schema2[field].categories)
+			// 	if (schema1[field].categories.indexOf(schema2[field].categories[i]) == -1)
+			// 		schema1[field].categories.push(schema2[field].categories[i])
 		}
 		return schema1;
 	}
 
-	this.dataset.aggregate(reducer, combiner, schema).then(function(schema) {
-		for (var i in schema) self.schema[i] = schema[i];	// apply schema
-		done(null, schema);
-	})
+	this.dataset.aggregate(reducer, combiner, schema, function(err, schema) {
+		for (var col in schema)
+			console.log(schema[col].idx + ':' +  col + ' ' + (schema[col].isReal ? 'real-valued' : 'categorical'));
+		done(err);
+	});
 });
 
 // Ploting distribution as feature_name.png
@@ -128,23 +163,6 @@ DataFrame.prototype.number_encode_features = function() {
 	return new DataFrame(dataset, this.fields);
 };
 
-DataFrame.prototype.select = function(fields) {
-	if (!Array.isArray(fields)) throw new Error('DataFrame.select(): fields argument must be an instance of Array.');
-	var fields_idx = [];
-	for (var i in fields) {
-		var idx = this.fields.indexOf(fields[i]);
-		if (idx == -1) throw new Error('DataFrame.select(): field ' + fields[i] + ' does not exist.');
-		fields_idx.push(idx);
-	}
-
-	return new DataFrame(this.dataset
-		.map(function(data, fields_idx) {
-			var tmp = [];
-			for (var i in fields_idx) tmp.push(data[fields_idx[i]]);
-			return tmp;
-	}, fields_idx), fields);
-}
-
 DataFrame.prototype.drop = function(fields) {
 	for (var i in fields)
 		if (this.fields.indexOf(fields[i]) == -1)
@@ -198,17 +216,83 @@ DataFrame.prototype.take = thenify(function(n, done) {
 	this.dataset.take(n, done);
 });
 
-function CSVDataFrame(sc, fields, file, sep, na_values) {
-	// DataFrame.call(this, sc.textFile(file)
-	// 	.map((line, sep) => line.split(sep).map(str => str.trim()), sep)			// split csv lines on separator
-	// 	.filter((data, na_values) => data.indexOf(na_values) == -1, na_values),		// ignore lines containing na_values
-	// fields);
+// Old version of CSV dataframe
+// DataFrame.call(this, sc.textFile(file)
+// 	.map((line, sep) => line.split(sep).map(str => str.trim()), sep)			// split csv lines on separator
+// 	.filter((data, na_values) => data.indexOf(na_values) == -1, na_values),		// ignore lines containing na_values
+// fields);
 
+/*
+	path: location of files,
+	header: when set to true the first line of files will be used to name columns and will not be included in data. 
+			All types will be assumed string. Default value is false.	
+	delimiter: by default columns are delimited using ,, but delimiter can be set to any character
+	quote: by default the quote character is ", but can be set to any character. Delimiters inside quotes are ignored	
+	escape: by default the escape character is \, but can be set to any character. Escaped quote characters are ignored
+	mode: determines the parsing mode. By default it is PERMISSIVE. Possible values are:
+		PERMISSIVE: tries to parse all lines: nulls are inserted for missing tokens and extra tokens are ignored.
+		DROPMALFORMED: drops lines which have fewer or more tokens than expected or tokens which do not match the schema
+		FAILFAST: aborts with a RuntimeException if encounters any malformed line	
+*/
+function CSVDataFrame2(sc, path, fields, options) {
+	var header = options.header || false;
+	var sep = options.sep || ',';
+	var quote = options.quote || '"';
+	var escape = options.escape || '\\';
+	var mode = options.mode || 'PERMISSIVE';
+
+	DataFrame.call(this, sc.textFile(path).map(CSVtoArray), fields);
+
+	function CSVtoArray (csvString) {
+	    var fieldEndMarker  = /([,\015\012] *)/g; 				/* Comma is assumed as field separator */
+	    var qFieldEndMarker = /("")*"([,\015\012] *)/g; 		/* Double quotes are assumed as the quote character */
+	    var startIndex = 0;
+	    var records = [], currentRecord = [];
+	    do {
+	        // If the to-be-matched substring starts with a double-quote, use the qFieldMarker regex, otherwise use fieldMarker.
+	        var endMarkerRE = (csvString.charAt (startIndex) == '"')  ? qFieldEndMarker : fieldEndMarker;
+	        endMarkerRE.lastIndex = startIndex;
+	        var matchArray = endMarkerRE.exec (csvString);
+	        if (!matchArray || !matchArray.length) {
+	            break;
+	        }
+	        var endIndex = endMarkerRE.lastIndex - matchArray[matchArray.length-1].length;
+	        var match = csvString.substring (startIndex, endIndex);
+	        if (match.charAt(0) == '"') { // The matching field starts with a quoting character, so remove the quotes
+	            match = match.substring (1, match.length-1).replace (/""/g, '"');
+	        }
+	        currentRecord.push (match);
+	        var marker = matchArray[0];
+	        if (marker.indexOf (',') < 0) { // Field ends with newline, not comma
+	            records.push (currentRecord);
+	            currentRecord = [];
+	        }
+	        startIndex = endMarkerRE.lastIndex;
+	    } while (true);
+	    if (startIndex < csvString.length) { // Maybe something left over?
+	        var remaining = csvString.substring (startIndex).trim();
+	        if (remaining) currentRecord.push (remaining);
+	    }
+	    if (currentRecord.length > 0) { // Account for the last record
+	        records.push (currentRecord);
+	    }
+	    return records[0];
+	};
+}
+
+function CSVDataFrame(sc, fields, file, sep, na_values) {
+	/*
+	charset: defaults to 'UTF-8' but can be set to other valid charset names
+	inferSchema: automatically infers column types. It requires one extra pass over the data and is false by default
+	comment: skip lines beginning with this character. Default is "#". Disable comments by setting this to null.
+	nullValue: specificy a string that indicates a null value, any fields matching this string will be set as nulls in the DataFrame
+	dateFormat: specificy a string that indicates a date format. Custom date formats follow the formats at java.text.SimpleDateFormat. This applies to both DateType and TimestampType. By default, it is null which means trying to parse times and date by java.sql.Timestamp.valueOf() and java.sql.Date.valueOf().
+	*/
 	DataFrame.call(this, sc.textFile(file).map(CSVtoArray), fields);
 
 	function CSVtoArray (csvString) {
-	    var fieldEndMarker  = /([,\015\012] *)/g; /* Comma is assumed as field separator */
-	    var qFieldEndMarker = /("")*"([,\015\012] *)/g; /* Double quotes are assumed as the quote character */
+	    var fieldEndMarker  = /([,\015\012] *)/g; 				/* Comma is assumed as field separator */
+	    var qFieldEndMarker = /("")*"([,\015\012] *)/g; 		/* Double quotes are assumed as the quote character */
 	    var startIndex = 0;
 	    var records = [], currentRecord = [];
 	    do {
